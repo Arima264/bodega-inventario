@@ -5,9 +5,24 @@
    Los datos se guardan en el localStorage del navegador.
    ========================================================= */
 
-/* ---------------- Almacenamiento ---------------- */
-const STORE_KEY = 'bodega.data.v1';
-const CART_KEY = 'bodega.cart.v1';
+/* ---------------- Conexión con la nube (Supabase) ----------------
+   La URL y la "publishable key" son públicas a propósito: los datos
+   están protegidos por las reglas de seguridad (RLS) de la base de datos,
+   que solo dejan leer/escribir a quien entró con la clave de la bodega. */
+const SUPA_URL = 'https://njmqeyeadxdqdgtjrhec.supabase.co';
+const SUPA_KEY = 'sb_publishable_7jQYU_efxjnPAzvPzMienw_-im0wsZa';
+
+const LEGACY_KEY = 'bodega.data.v1';   // datos de la versión anterior (solo navegador)
+const CART_KEY = 'bodega.cart.v1';     // el carrito es de cada equipo
+const USER_KEY = 'bodega.usuario';
+const EMAIL_KEY = 'bodega.email';
+const COLS = ['productos', 'proveedores', 'movimientos', 'devoluciones', 'pedidos', 'ventas'];
+const supa = window.supabase
+  ? window.supabase.createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: true, autoRefreshToken: true } })
+  : null;
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* sin almacenamiento */ } };
+const lsDel = k => { try { localStorage.removeItem(k); } catch { /* */ } };
 
 function defaultData() {
   return {
@@ -36,24 +51,15 @@ function normalizeData(d) {
   }
   return d;
 }
-function loadData() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) return normalizeData(JSON.parse(raw));
-  } catch (e) { console.warn('No se pudo leer los datos guardados', e); }
-  return defaultData();
-}
-let S = loadData();
+let S = defaultData();
 let CART = (() => {
-  try { const c = JSON.parse(localStorage.getItem(CART_KEY) || '[]'); return Array.isArray(c) ? c : []; }
+  try { const c = JSON.parse(lsGet(CART_KEY) || '[]'); return Array.isArray(c) ? c : []; }
   catch { return []; }
 })();
+let USUARIO = lsGet(USER_KEY) || '';
 
-function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
-  catch (e) { toast('No se pudo guardar: ' + e.message, 'error'); }
-}
-function saveCart() { try { localStorage.setItem(CART_KEY, JSON.stringify(CART)); } catch { /* sin espacio */ } }
+function save() { scheduleSync(); }
+function saveCart() { lsSet(CART_KEY, JSON.stringify(CART)); }
 function commit() { save(); renderAll(); }
 
 /* ---------------- Utilidades ---------------- */
@@ -77,8 +83,12 @@ function fmtDT(s) { const d = parseDate(s); return d ? d.toLocaleString('es-PE',
 function fmtTime(s) { const d = parseDate(s); return d ? d.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' }) : ''; }
 function daysFromToday(s) { const d = parseDate(s); return d ? Math.round((d - parseDate(today())) / 864e5) : null; }
 const isToday = iso => { const d = new Date(iso); return d.toDateString() === new Date().toDateString(); };
-const peekCode = (k, p) => `${p}-${pad(S.counters[k] + 1)}`;
-const nextCode = (k, p) => { S.counters[k]++; return `${p}-${pad(S.counters[k])}`; };
+// El siguiente código se calcula con el mayor código existente, así dos equipos no repiten números.
+const COLL_OF = { prod: 'productos', prov: 'proveedores', dev: 'devoluciones', ped: 'pedidos', venta: 'ventas' };
+const codeNum = c => parseInt(String(c || '').split('-').pop(), 10) || 0;
+const nextNum = k => Math.max(num(S.counters[k]), ...(S[COLL_OF[k]] || []).map(x => codeNum(x.codigo)), 0) + 1;
+const peekCode = (k, p) => `${p}-${pad(nextNum(k))}`;
+const nextCode = (k, p) => { S.counters[k] = nextNum(k); return `${p}-${pad(S.counters[k])}`; };
 const validColor = c => (/^#[0-9a-f]{6}$/i.test(c || '') ? c : null);
 const cmp = (x, y) => (typeof x === 'string' ? x.localeCompare(y, 'es', { numeric: true }) : x - y);
 const plural = (n, a, b) => `${fmtNum(n)} ${n === 1 ? a : b}`;
@@ -173,7 +183,9 @@ function mover(p, tipo, cantidad, nota = '', ref = '') {
   const q = Math.abs(num(cantidad));
   if (!q) return;
   p.cantidad = r3(num(p.cantidad) + signo * q);
-  S.movimientos.push({ id: uid(), productoId: p.id, tipo, cantidad: q, signo, fecha: new Date().toISOString(), nota, ref, saldo: p.cantidad });
+  // el cambio de stock se manda a la nube como suma/resta, así dos personas no se pisan
+  pendDelta.set(p.id, r3((pendDelta.get(p.id) || 0) + signo * q));
+  S.movimientos.push({ id: uid(), productoId: p.id, tipo, cantidad: q, signo, fecha: new Date().toISOString(), nota, ref, saldo: p.cantidad, usuario: USUARIO });
 }
 function cambiarPrecioCompra(p, nuevo, ref) {
   if (!p.historialPrecios) p.historialPrecios = [];
@@ -270,7 +282,7 @@ const ui = {
   prv: { q: '' },
   pos: { q: '', cat: '' },
 };
-const TABS = ['inventario', 'devoluciones', 'proveedores', 'ventas', 'config'];
+const TABS = ['inventario', 'devoluciones', 'proveedores', 'ventas', 'historial', 'config'];
 function setTab(t) {
   if (!TABS.includes(t)) t = 'inventario';
   ui.tab = t;
@@ -506,7 +518,7 @@ function formProducto(id) {
     if (b.dataset.quick === 'cat') {
       const v = await askText('Nueva categoría', 'Nombre de la categoría');
       if (!v) return;
-      if (!S.config.categorias.some(c => norm(c) === norm(v))) S.config.categorias.push(v);
+      if (!S.config.categorias.some(c => norm(c) === norm(v))) { S.config.categorias.push(v); logH('Categoría agregada', v); }
       const real = S.config.categorias.find(c => norm(c) === norm(v));
       E.categoria.innerHTML = catOptionsHTML(real);
       save(); renderAll();
@@ -515,6 +527,7 @@ function formProducto(id) {
       if (!v) return;
       const pv = { id: uid(), codigo: nextCode('prov', 'PRV'), empresa: v, contacto: '', telefono: '', email: '', ruc: '', direccion: '', notas: '', creado: new Date().toISOString() };
       S.proveedores.push(pv);
+      logH('Proveedor agregado', `${pv.codigo} ${v}`);
       E.proveedorId.innerHTML = provOptionsHTML(pv.id);
       save(); renderAll();
       toast('Proveedor creado. Completa sus datos en la pestaña Proveedores.');
@@ -541,14 +554,18 @@ function formProducto(id) {
       const np = { id: uid(), codigo: nextCode('prod', 'P'), creado: new Date().toISOString(), cantidad: 0, ...datos };
       S.productos.push(np);
       if (cant) mover(np, cant > 0 ? 'entrada' : 'ajuste', cant, 'Stock inicial');
+      logH('Producto agregado', `${np.codigo} ${nombre} · stock ${fmtNum(cant)} · compra ${moneyTxt(datos.precioCompra)} · venta ${moneyTxt(datos.precioVenta)}`);
       toast(`Producto ${np.codigo} agregado`);
     } else {
+      const antes = { ...p };
       if (r2(num(p.precioCompra)) !== datos.precioCompra) {
         cambiarPrecioCompra(p, datos.precioCompra, 'Edición manual');
       }
       Object.assign(p, datos);
       const diff = r3(cant - num(p.cantidad));
       if (diff) mover(p, 'ajuste', diff, 'Ajuste manual (edición)');
+      const cambios = diffProducto(antes, p);
+      if (cambios) logH('Producto editado', `${p.codigo} ${p.nombre} · ${cambios}`);
       toast('Producto actualizado');
     }
     d.close();
@@ -623,13 +640,13 @@ function verProducto(id) {
         return `<tr><td class="mono">${esc(x.codigo)}</td><td>${esc(provName(x.proveedorId, x.proveedorNombre))}</td><td class="num">${fmtNum(it.cantidad)} × ${money(it.precio)}</td><td>${llegadaHTML(x)}</td></tr>`;
       }).join('')}</tbody></table></div>` : ''}
       <h4 class="sub-h">Historial de movimientos</h4>
-      ${movs.length ? `<div class="table-wrap flat"><table class="tbl compact"><thead><tr><th>Fecha</th><th>Tipo</th><th class="num">Cantidad</th><th class="num">Saldo</th><th>Nota / referencia</th></tr></thead><tbody>
+      ${movs.length ? `<div class="table-wrap flat"><table class="tbl compact"><thead><tr><th>Fecha</th><th>Tipo</th><th class="num">Cantidad</th><th class="num">Saldo</th><th>Nota / referencia</th><th>Quién</th></tr></thead><tbody>
         ${movs.slice(0, 40).map(mv => {
           const s = mv.signo ?? (mv.tipo === 'entrada' ? 1 : -1);
           return `<tr><td>${fmtDT(mv.fecha)}</td><td>${MOV[mv.tipo] || mv.tipo}</td>
             <td class="num ${s > 0 ? 'pos-t' : 'neg'}">${s > 0 ? '+' : '−'}${fmtNum(mv.cantidad)}</td>
             <td class="num">${mv.saldo !== undefined ? fmtNum(mv.saldo) : ''}</td>
-            <td>${esc(mv.nota || '')}${mv.ref ? ` <span class="mono muted">${esc(mv.ref)}</span>` : ''}</td></tr>`;
+            <td>${esc(mv.nota || '')}${mv.ref ? ` <span class="mono muted">${esc(mv.ref)}</span>` : ''}</td><td class="muted">${esc(mv.usuario || '')}</td></tr>`;
         }).join('')}</tbody></table></div>${movs.length > 40 ? `<p class="hint">Mostrando los últimos 40 de ${movs.length}.</p>` : ''}`
         : '<p class="muted">Sin movimientos todavía.</p>'}
       ${p.notas ? `<h4 class="sub-h">Notas</h4><div class="notes">${esc(p.notas)}</div>` : ''}
@@ -664,6 +681,8 @@ function verProducto(id) {
       if (cant <= 0) return toast('Ingresa una cantidad mayor a 0', 'error');
       mover(p, tipo, cant, nota);
     }
+    const ult = S.movimientos[S.movimientos.length - 1];
+    logH(MOV[ult.tipo], `${p.codigo} ${p.nombre}: ${ult.signo > 0 ? '+' : '−'}${fmtNum(ult.cantidad)} → stock ${fmtNum(p.cantidad)}${nota ? ' · ' + nota : ''}`);
     commit();
     paint();
     toast('Movimiento registrado');
@@ -682,7 +701,9 @@ async function eliminarProducto(id) {
   if (!ok) return false;
   S.productos = S.productos.filter(x => x.id !== id);
   S.movimientos = S.movimientos.filter(m => m.productoId !== id);
+  pendDelta.delete(id);
   CART = CART.filter(c => c.productoId !== id); saveCart();
+  logH('Producto eliminado', `${p.codigo} ${p.nombre} (tenía ${fmtNum(p.cantidad)} ${p.unidad || ''})`);
   commit();
   toast('Producto eliminado');
   return true;
@@ -725,6 +746,7 @@ function buildDevoluciones() {
     if (b?.dataset.act === 'toggle') {
       dv.estado = dv.estado === 'realizada' ? 'pendiente' : 'realizada';
       dv.fechaRealizada = dv.estado === 'realizada' ? today() : null;
+      logH(dv.estado === 'realizada' ? 'Devolución realizada' : 'Devolución a pendiente', `${dv.codigo} ${prodById(dv.productoId)?.nombre || dv.productoNombre} × ${fmtNum(dv.cantidad)}`);
       commit();
       toast(dv.estado === 'realizada' ? `${dv.codigo} marcada como realizada` : `${dv.codigo} volvió a pendiente`);
       return;
@@ -851,6 +873,7 @@ function formDevolucion(id) {
     if (est === 'pendiente') rec.fechaRealizada = null;
     rec.estado = est;
     if (isNew) S.devoluciones.push(rec);
+    logH(isNew ? 'Devolución registrada' : 'Devolución editada', `${rec.codigo} ${p.nombre} × ${fmtNum(cant)} · ${rec.motivo} · ${rec.estado}${rec.descontado ? ' · descontado del stock' : ''}`);
     d.close();
     commit();
     toast(isNew ? `Devolución ${rec.codigo} registrada` : 'Devolución actualizada');
@@ -864,6 +887,7 @@ async function eliminarDevolucion(id) {
   if (!(await confirmBox(msg, { ok: 'Eliminar', danger: true, title: 'Eliminar devolución' }))) return;
   if (dv.descontado) mover(prodById(dv.productoId), 'ajuste', num(dv.cantidad), 'Devolución eliminada', dv.codigo);
   S.devoluciones = S.devoluciones.filter(x => x.id !== id);
+  logH('Devolución eliminada', `${dv.codigo} ${prodById(dv.productoId)?.nombre || dv.productoNombre} × ${fmtNum(dv.cantidad)}`);
   commit();
   toast('Devolución eliminada');
 }
@@ -1073,6 +1097,7 @@ function formProveedor(id) {
     if (!datos.empresa) return toast('Escribe el nombre de la empresa', 'error');
     if (isNew) S.proveedores.push({ id: uid(), codigo: nextCode('prov', 'PRV'), creado: new Date().toISOString(), ...datos });
     else Object.assign(p, datos);
+    logH(isNew ? 'Proveedor agregado' : 'Proveedor editado', datos.empresa);
     d.close();
     commit();
     toast(isNew ? 'Proveedor agregado' : 'Proveedor actualizado');
@@ -1090,6 +1115,7 @@ async function eliminarProveedor(id) {
   S.pedidos.forEach(x => { if (x.proveedorId === id) x.proveedorNombre = p.empresa; });
   S.devoluciones.forEach(x => { if (x.proveedorId === id) x.proveedorNombre = p.empresa; });
   S.proveedores = S.proveedores.filter(x => x.id !== id);
+  logH('Proveedor eliminado', p.empresa);
   commit();
   toast('Proveedor eliminado');
 }
@@ -1209,10 +1235,11 @@ function formPedido(id, provId = '', preItems = null) {
     if (!items.length) return toast('Agrega al menos un producto', 'error');
     const rec = pd || { id: uid(), codigo: nextCode('ped', 'PED'), creado: new Date().toISOString() };
     let cambios = 0;
+    const precios = [];
     items.forEach(it => {
       if (it.upd) {
         const p = prodById(it.productoId);
-        if (p && r2(num(p.precioCompra)) !== it.precio) { cambiarPrecioCompra(p, it.precio, rec.codigo); cambios++; }
+        if (p && r2(num(p.precioCompra)) !== it.precio) { precios.push(`${p.nombre} ${moneyTxt(p.precioCompra)} → ${moneyTxt(it.precio)}`); cambiarPrecioCompra(p, it.precio, rec.codigo); cambios++; }
       }
       delete it.upd;
     });
@@ -1221,6 +1248,8 @@ function formPedido(id, provId = '', preItems = null) {
       fechaLlegada: E.fechaLlegada.value, estado: E.estado.value, notas: E.notas.value.trim(), items,
     });
     if (isNew) S.pedidos.push(rec);
+    logH(isNew ? 'Pedido creado' : 'Pedido editado', `${rec.codigo} · ${pv.empresa} · ${items.length} producto(s) · ${moneyTxt(pedTotal(rec))}${rec.fechaLlegada ? ' · llega ' + fmtDate(rec.fechaLlegada) : ''}`);
+    if (precios.length) logH('Precio de compra cambiado', precios.join(' · ') + ` (pedido ${rec.codigo})`);
     d.close();
     ui.ped.sub = 'pedidos';
     commit();
@@ -1273,18 +1302,18 @@ function verPedido(id) {
     if (!x) return;
     const act = b.dataset.act;
     if (act === 'recibir') { if (await recibirPedido(id)) paint(); }
-    if (act === 'camino') { x.estado = 'camino'; commit(); paint(); toast('Pedido marcado en camino'); }
+    if (act === 'camino') { x.estado = 'camino'; logH('Pedido en camino', `${x.codigo} · ${provName(x.proveedorId, x.proveedorNombre)}`); commit(); paint(); toast('Pedido marcado en camino'); }
     if (act === 'edit') { d.close(); formPedido(id); }
     if (act === 'copy') copiarPedido(x);
     if (act === 'cancel') {
       if (await confirmBox(`¿Cancelar el pedido <b>${esc(x.codigo)}</b>? No se modifica el stock.`, { ok: 'Cancelar pedido', danger: true, title: 'Cancelar pedido' })) {
-        x.estado = 'cancelado'; commit(); paint(); toast('Pedido cancelado');
+        x.estado = 'cancelado'; logH('Pedido cancelado', `${x.codigo} · ${provName(x.proveedorId, x.proveedorNombre)} · ${moneyTxt(pedTotal(x))}`); commit(); paint(); toast('Pedido cancelado');
       }
     }
     if (act === 'del') {
       const extra = x.estado === 'recibido' ? ' El stock que ya se sumó no se modifica.' : '';
       if (await confirmBox(`Se eliminará el pedido <b>${esc(x.codigo)}</b>.${extra}`, { ok: 'Eliminar', danger: true, title: 'Eliminar pedido' })) {
-        S.pedidos = S.pedidos.filter(y => y.id !== id); commit(); d.close(); toast('Pedido eliminado');
+        S.pedidos = S.pedidos.filter(y => y.id !== id); logH('Pedido eliminado', `${x.codigo} · ${provName(x.proveedorId, x.proveedorNombre)}`); commit(); d.close(); toast('Pedido eliminado');
       }
     }
   });
@@ -1303,6 +1332,7 @@ async function recibirPedido(id) {
   });
   x.estado = 'recibido';
   x.recibidoEn = today();
+  logH('Pedido recibido', `${x.codigo} · ${provName(x.proveedorId, x.proveedorNombre)} · +${fmtNum(pedUnits(x))} unidades al stock · ${moneyTxt(pedTotal(x))}`);
   commit();
   toast(`Pedido ${x.codigo} recibido${faltan ? ` (${faltan} producto(s) ya no existen)` : ''}`);
   return true;
@@ -1435,7 +1465,7 @@ function renderCart() {
     <button type="button" class="btn primary block lg" data-act="sell" ${lines.length ? '' : 'disabled'}>Registrar venta</button>
     <p class="hint">Registrar la venta descuenta el stock. Si solo quieres saber el total, no es necesario.</p>
     <details class="sales"><summary>Ventas de hoy: ${hoy.length} · ${money(hoy.reduce((s, v) => s + num(v.total), 0))}</summary>
-      ${hoy.length ? `<ul>${hoy.map(v => `<li><div class="row"><span><b class="mono">${esc(v.codigo)}</b> <small>${fmtTime(v.fecha)}</small></span><b>${money(v.total)}</b></div>
+      ${hoy.length ? `<ul>${hoy.map(v => `<li><div class="row"><span><b class="mono">${esc(v.codigo)}</b> <small>${fmtTime(v.fecha)}${v.usuario ? ' · ' + esc(v.usuario) : ''}</small></span><b>${money(v.total)}</b></div>
         <small>${v.items.map(it => `${fmtNum(it.cantidad)} × ${esc(prodById(it.productoId)?.nombre || it.nombre)}`).join(', ')}</small>
         <div class="row"><span></span><button type="button" class="btn sm ghost" data-act="anular" data-venta="${v.id}">${I.undo} Anular</button></div></li>`).join('')}</ul>`
         : '<p class="muted">Aún no hay ventas registradas hoy.</p>'}
@@ -1460,7 +1490,8 @@ async function registrarVenta() {
   const code = nextCode('venta', 'V');
   const items = lines.map(x => ({ productoId: x.p.id, nombre: x.p.nombre, cantidad: x.c.cantidad, precio: num(x.p.precioVenta) }));
   items.forEach(it => mover(prodById(it.productoId), 'venta', it.cantidad, 'Venta', code));
-  S.ventas.push({ id: uid(), codigo: code, fecha: new Date().toISOString(), items, total: r2(items.reduce((s, i) => s + i.cantidad * i.precio, 0)) });
+  S.ventas.push({ id: uid(), codigo: code, fecha: new Date().toISOString(), items, total: r2(items.reduce((s, i) => s + i.cantidad * i.precio, 0)), usuario: USUARIO });
+  logH('Venta', `${code} · ${moneyTxt(total)} · ${items.map(it => `${fmtNum(it.cantidad)} × ${it.nombre}`).join(', ')}`);
   if (S.ventas.length > 3000) S.ventas = S.ventas.slice(-3000);
   CART = [];
   saveCart();
@@ -1475,6 +1506,7 @@ async function anularVenta(id) {
   v.items.forEach(it => mover(prodById(it.productoId), 'ajuste', it.cantidad, 'Venta anulada', v.codigo));
   S.movimientos = S.movimientos.filter(m => !(m.tipo === 'venta' && m.ref === v.codigo));
   S.ventas = S.ventas.filter(x => x.id !== id);
+  logH('Venta anulada', `${v.codigo} · ${moneyTxt(v.total)}`);
   commit();
   toast('Venta anulada');
 }
@@ -1490,23 +1522,24 @@ function buildConfig() {
     if (f.id === 'cfg-gen') {
       c.nombre = E.nombre.value.trim() || 'Mi Bodega';
       c.moneda = E.moneda.value.trim() || 'S/';
-      commit(); toast('Datos guardados');
+      logH('Configuración', `Nombre: ${c.nombre} · moneda: ${c.moneda}`); commit(); toast('Datos guardados');
     }
     if (f.id === 'cfg-min') {
       c.stockMinGlobal = Math.max(0, num(E.min.value));
-      commit(); toast('Stock mínimo universal actualizado');
+      logH('Configuración', `Stock mínimo universal: ${fmtNum(c.stockMinGlobal)}`); commit(); toast('Stock mínimo universal actualizado');
     }
     if (f.id === 'cfg-rot') {
       const dias = Math.max(1, Math.round(num(E.dias.value))), rap = num(E.rapida.value), nor = num(E.normal.value);
       if (nor <= 0 || rap <= nor) return toast('“Rápida” debe ser mayor que “Normal”, y ambas mayores a 0', 'error');
       Object.assign(c, { rotDias: dias, rotRapida: rap, rotNormal: nor });
-      commit(); toast('Niveles de rotación actualizados');
+      logH('Configuración', `Rotación: ${dias} días · rápida ${fmtNum(rap)} · normal ${fmtNum(nor)}`); commit(); toast('Niveles de rotación actualizados');
     }
     if (f.id === 'cfg-cat') {
       const v = E.cat.value.trim();
       if (!v) return;
       if (c.categorias.some(x => norm(x) === norm(v))) return toast('Esa categoría ya existe', 'error');
       c.categorias.push(v);
+      logH('Categoría agregada', v);
       commit(); toast('Categoría agregada');
       setTimeout(() => $('#cfg-cat input')?.focus(), 0);
     }
@@ -1522,7 +1555,7 @@ function buildConfig() {
       if (c.categorias.some(x => x !== old && norm(x) === norm(v))) return toast('Esa categoría ya existe', 'error');
       c.categorias = c.categorias.map(x => (x === old ? v : x));
       S.productos.forEach(p => { if (p.categoria === old) p.categoria = v; });
-      commit(); toast('Categoría renombrada');
+      logH('Categoría renombrada', `${old} → ${v}`); commit(); toast('Categoría renombrada');
     }
     if (act === 'del-cat') {
       const cat = b.dataset.cat;
@@ -1530,11 +1563,12 @@ function buildConfig() {
       if (n && !(await confirmBox(`<b>${esc(cat)}</b> está en ${n} producto(s). Quedarán sin categoría.`, { ok: 'Eliminar', danger: true, title: 'Eliminar categoría' }))) return;
       c.categorias = c.categorias.filter(x => x !== cat);
       S.productos.forEach(p => { if (p.categoria === cat) p.categoria = ''; });
-      commit(); toast('Categoría eliminada');
+      logH('Categoría eliminada', cat); commit(); toast('Categoría eliminada');
     }
     if (act === 'reset-mins') {
       if (!(await confirmBox('Todos los productos usarán el mínimo universal.', { ok: 'Aplicar', title: 'Quitar mínimos propios' }))) return;
       S.productos.forEach(p => { p.stockMin = null; });
+      logH('Configuración', 'Todos los productos usan el mínimo universal');
       commit(); toast('Listo');
     }
     if (act === 'export') exportarJSON();
@@ -1588,7 +1622,7 @@ function renderConfig() {
         <form id="cfg-cat" class="row-form"><input name="cat" maxlength="40" placeholder="Nueva categoría" aria-label="Nueva categoría"><button class="btn primary sm">Agregar</button></form>
       </section>
 
-      <section class="card"><h3>Respaldo de datos</h3><p class="desc">Los datos se guardan <b>solo en este navegador</b>. Descarga un respaldo seguido; con él puedes pasar la información a otra computadora o celular.</p>
+      <section class="card"><h3>Respaldo de datos</h3><p class="desc">Los datos se guardan <b>en la nube</b> y se ven igual en todos los equipos. Igual descarga un respaldo de vez en cuando, por seguridad.</p>
         <div class="btn-row">
           <button type="button" class="btn" data-act="export">Descargar respaldo (.json)</button>
           <label class="btn">Importar respaldo<input type="file" id="cfg-import" accept=".json,application/json" hidden></label>
@@ -1636,8 +1670,9 @@ function importarJSON(input) {
     try {
       const data = JSON.parse(reader.result);
       if (!data || !Array.isArray(data.productos) || !data.config) throw new Error('formato');
-      if (!(await confirmBox(`El respaldo tiene <b>${data.productos.length} productos</b>. Reemplazará todos los datos actuales de este navegador.`, { ok: 'Importar', danger: true, title: 'Importar respaldo' }))) return;
-      S = normalizeData(data);
+      if (!(await confirmBox(`El respaldo tiene <b>${data.productos.length} productos</b>. Reemplazará <b>todos</b> los datos actuales en la nube, para todos los equipos.`, { ok: 'Importar', danger: true, title: 'Importar respaldo' }))) return;
+      replaceAll(normalizeData(data));
+      logH('Respaldo importado', `${S.productos.length} productos · archivo ${file.name}`);
       commit();
       toast('Respaldo importado');
     } catch { toast('El archivo no es un respaldo válido', 'error'); }
@@ -1645,19 +1680,20 @@ function importarJSON(input) {
   reader.readAsText(file);
 }
 async function borrarTodo() {
-  const ok = await confirmBox('Se borrarán <b>todos</b> los productos, proveedores, pedidos, devoluciones y ventas de este navegador. Descarga un respaldo antes si lo necesitas.', { ok: 'Borrar todo', danger: true, title: 'Borrar todo' });
+  const ok = await confirmBox('Se borrarán <b>todos</b> los productos, proveedores, pedidos, devoluciones y ventas <b>para todos los equipos</b>. Descarga un respaldo antes si lo necesitas.', { ok: 'Borrar todo', danger: true, title: 'Borrar todo' });
   if (!ok) return;
   const keep = { nombre: S.config.nombre, moneda: S.config.moneda };
-  S = defaultData();
+  replaceAll(defaultData());
   Object.assign(S.config, keep);
   CART = []; saveCart();
+  logH('Datos borrados', 'Se borró toda la información');
   commit();
   toast('Datos borrados');
 }
 
 /* ---------- Datos de ejemplo ---------- */
 async function cargarEjemplo() {
-  if (S.productos.length && !(await confirmBox('Los datos de ejemplo <b>reemplazarán</b> los datos actuales.', { ok: 'Cargar ejemplo', danger: true, title: 'Datos de ejemplo' }))) return;
+  if (S.productos.length && !(await confirmBox('Los datos de ejemplo <b>reemplazarán</b> los datos actuales en la nube, para todos los equipos.', { ok: 'Cargar ejemplo', danger: true, title: 'Datos de ejemplo' }))) return;
   let seed = 7;
   const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
   const keep = { nombre: S.config.nombre, moneda: S.config.moneda };
@@ -1740,6 +1776,8 @@ async function cargarEjemplo() {
     { id: uid(), codigo: nextCode('dev', 'DEV'), creado: iso(now - 6 * DAY), fecha: dateStr(-6), productoId: P('Gaseosa 500 ml').id, productoNombre: 'Gaseosa 500 ml', cantidad: 6, motivo: 'Dañado / roto', detalle: 'Botellas abolladas', proveedorId: provs[2].id, proveedorNombre: provs[2].empresa, empresa: 'Transportes Lima Norte', contacto: 'Kevin Huamán', estado: 'realizada', fechaRealizada: dateStr(-4), descontado: false, notas: '' },
   ];
   CART = []; saveCart();
+  replaceAll(S);
+  logH('Datos de ejemplo cargados', `${S.productos.length} productos de prueba`);
   commit();
   toast('Datos de ejemplo cargados');
 }
@@ -1747,31 +1785,429 @@ async function cargarEjemplo() {
 /* =========================================================
    Arranque
    ========================================================= */
-function renderAll() {
+/* =========================================================
+   6. HISTORIAL DE CAMBIOS (quién cambió qué y cuándo)
+   ========================================================= */
+const pendLog = [];   // entradas por enviar a la nube
+function logH(accion, detalle = '') {
+  pendLog.push({ usuario: USUARIO || 'Sin nombre', accion, detalle: String(detalle).slice(0, 900), fecha: new Date().toISOString() });
+  scheduleSync();
+}
+function diffProducto(a, b) {
+  const L = [];
+  const f = (lbl, x, y, fm = v => (v === '' || v === null || v === undefined ? '—' : v)) => {
+    if (String(x ?? '') !== String(y ?? '')) L.push(`${lbl}: ${fm(x)} → ${fm(y)}`);
+  };
+  f('Nombre', a.nombre, b.nombre);
+  f('Categoría', a.categoria, b.categoria);
+  f('Proveedor', provName(a.proveedorId), provName(b.proveedorId));
+  f('Unidad', a.unidad, b.unidad);
+  f('P. compra', r2(num(a.precioCompra)), r2(num(b.precioCompra)), moneyTxt);
+  f('P. venta', r2(num(a.precioVenta)), r2(num(b.precioVenta)), moneyTxt);
+  f('Stock mínimo', hasOwnMin(a) ? num(a.stockMin) : 'universal', hasOwnMin(b) ? num(b.stockMin) : 'universal');
+  f('Stock', r3(num(a.cantidad)), r3(num(b.cantidad)));
+  f('Ubicación', a.ubicacion, b.ubicacion);
+  if (JSON.stringify(a.fmt || {}) !== JSON.stringify(b.fmt || {})) L.push('Formato del nombre');
+  if ((a.notas || '') !== (b.notas || '')) L.push('Notas');
+  return L.join(' · ');
+}
+
+const hist = { rows: [], q: '', user: '', loading: false, error: '' };
+function buildHistorial() {
+  $('#tab-historial').innerHTML = `
+    <div class="ph"><div><h2>Historial de cambios</h2><p>Todo lo que se registra o modifica, con la persona y la hora.</p></div></div>
+    <div class="toolbar">
+      <label class="search">${I.search}<input id="his-q" type="search" placeholder="Buscar producto, acción, código…" autocomplete="off"></label>
+      <select id="his-user" title="Persona"></select>
+      <div class="spacer"></div>
+      <button class="btn" id="his-reload" type="button">${I.undo} Actualizar</button>
+    </div>
+    <div class="meta" id="his-meta"></div>
+    <div class="table-wrap" id="his-wrap"></div>`;
+  $('#his-q').addEventListener('input', e => { hist.q = e.target.value; renderHistorial(); });
+  $('#his-user').addEventListener('change', e => { hist.user = e.target.value; renderHistorial(); });
+  $('#his-reload').addEventListener('click', () => loadHistorial());
+}
+async function loadHistorial() {
+  if (!supa || hist.loading) return;
+  hist.loading = true; hist.error = '';
+  renderHistorial();
+  const { data, error } = await supa.from('historial').select('id,fecha,usuario,accion,detalle').order('id', { ascending: false }).limit(500);
+  hist.loading = false;
+  if (error) hist.error = 'No se pudo cargar el historial: ' + error.message;
+  else hist.rows = data || [];
+  renderHistorial();
+}
+function renderHistorial() {
+  const wrap = $('#his-wrap');
+  if (!wrap) return;
+  const users = [...new Set(hist.rows.map(r => r.usuario).filter(Boolean))].sort(cmp);
+  fillSelect($('#his-user'), [['', 'Todas las personas'], ...users.map(u => [u, u])], hist.user);
+  hist.user = $('#his-user').value;
+  if (hist.error) { wrap.innerHTML = `<div class="empty"><h3>Error</h3><p>${esc(hist.error)}</p></div>`; return; }
+  if (hist.loading && !hist.rows.length) { wrap.innerHTML = `<div class="empty"><p>Cargando…</p></div>`; return; }
+  const q = norm(hist.q.trim());
+  const list = hist.rows.filter(r => (!hist.user || r.usuario === hist.user) && (!q || norm(`${r.accion} ${r.detalle} ${r.usuario}`).includes(q)));
+  $('#his-meta').textContent = hist.rows.length ? `Mostrando ${list.length} de los últimos ${hist.rows.length} cambios` : '';
+  if (!hist.rows.length) { wrap.innerHTML = `<div class="empty"><h3>Sin cambios todavía</h3><p>Aquí aparecerá cada cambio que hagan en la página.</p></div>`; return; }
+  if (!list.length) { wrap.innerHTML = `<div class="empty"><h3>Sin resultados</h3></div>`; return; }
+  wrap.innerHTML = `<table class="tbl compact"><thead><tr><th>Fecha y hora</th><th>Quién</th><th>Acción</th><th>Detalle</th></tr></thead><tbody>
+    ${list.map(r => `<tr><td style="white-space:nowrap">${fmtDT(r.fecha)}</td><td><b>${esc(r.usuario || '—')}</b></td><td><span class="chip">${esc(r.accion)}</span></td><td>${esc(r.detalle || '')}</td></tr>`).join('')}
+  </tbody></table>`;
+}
+
+/* =========================================================
+   SINCRONIZACIÓN CON LA NUBE
+   Cada producto, pedido, etc. es una fila en la tabla "registros".
+   Los cambios se envían solos y los de otros equipos llegan en vivo.
+   ========================================================= */
+const snap = new Map();       // "coleccion|id" -> cómo está en la nube (JSON)
+const pendDelta = new Map();  // productoId -> suma/resta de stock por enviar
+let forceFull = false;        // tras importar/borrar todo: enviar todo tal cual
+let ready = false, syncing = false, syncAgain = false, syncTimer = null, retryTimer = null;
+let chan = null;
+
+function stable(v) {
+  if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+  return JSON.stringify(v ?? null);
+}
+function snapCant(id) {
+  const js = snap.get('productos|' + id);
+  if (!js) return null;
+  try { return num(JSON.parse(js).cantidad); } catch { return 0; }
+}
+/** Forma en que se envía un registro. El stock de un producto se manda aparte, como suma/resta. */
+function wire(col, rec) {
+  if (col !== 'productos' || forceFull) return rec;
+  const c = snapCant(rec.id);
+  return { ...rec, cantidad: c === null ? r3(num(rec.cantidad) - (pendDelta.get(rec.id) || 0)) : c };
+}
+function localRecords() {
+  const out = new Map();
+  out.set('config|main', { col: 'config', id: 'main', data: { config: S.config, counters: S.counters } });
+  for (const c of COLS) for (const r of S[c]) out.set(`${c}|${r.id}`, { col: c, id: r.id, data: r });
+  return out;
+}
+function hasPending() {
+  if (pendDelta.size || pendLog.length || forceFull) return true;
+  const recs = localRecords();
+  if ([...snap.keys()].some(k => !recs.has(k))) return true;
+  for (const [k, r] of recs) if (snap.get(k) !== stable(wire(r.col, r.data))) return true;
+  return false;
+}
+function replaceAll(nuevo) { S = nuevo; pendDelta.clear(); forceFull = true; }
+
+function scheduleSync(ms = 300) {
+  if (!ready) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(sync, ms);
+  setStatus('saving');
+}
+function isAuthError(e) { return e && (e.status === 401 || e.code === 'PGRST301' || /JWT|jwt|not authenticated/i.test(e.message || '')); }
+
+async function sync() {
+  if (!ready || !supa) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true;
+  clearTimeout(retryTimer);
+  let stockChanged = false;
+  try {
+    const full = forceFull;
+    const recs = localRecords();
+    const ups = [];
+    for (const [k, r] of recs) {
+      const data = wire(r.col, r.data);
+      const js = stable(data);
+      if (snap.get(k) !== js) ups.push({ k, js, row: { coleccion: r.col, id: r.id, data: JSON.parse(JSON.stringify(data)), actualizado: new Date().toISOString() } });
+    }
+    for (let i = 0; i < ups.length; i += 300) {
+      const part = ups.slice(i, i + 300);
+      const { error } = await supa.from('registros').upsert(part.map(u => u.row), { onConflict: 'coleccion,id' });
+      if (error) throw error;
+      part.forEach(u => snap.set(u.k, u.js));
+    }
+    const dels = [...snap.keys()].filter(k => !localRecords().has(k));
+    const byCol = {};
+    dels.forEach(k => { const [c, ...rest] = k.split('|'); (byCol[c] = byCol[c] || []).push(rest.join('|')); });
+    for (const [c, ids] of Object.entries(byCol)) {
+      for (let i = 0; i < ids.length; i += 150) {
+        const part = ids.slice(i, i + 150);
+        const { error } = await supa.from('registros').delete().eq('coleccion', c).in('id', part);
+        if (error) throw error;
+        part.forEach(id => snap.delete(`${c}|${id}`));
+      }
+    }
+    if (full) { forceFull = false; pendDelta.clear(); }
+    for (const [pid, delta] of [...pendDelta]) {
+      if (!delta || !snap.has('productos|' + pid)) { pendDelta.delete(pid); continue; }
+      const { data, error } = await supa.rpc('mover_stock', { p_id: pid, delta });
+      if (error) throw error;
+      const rest = r3((pendDelta.get(pid) || 0) - delta);
+      if (rest) pendDelta.set(pid, rest); else pendDelta.delete(pid);
+      if (data !== null && data !== undefined) {
+        const k = 'productos|' + pid;
+        try { const o = JSON.parse(snap.get(k)); o.cantidad = num(data); snap.set(k, stable(o)); } catch { /* */ }
+        const p = prodById(pid);
+        const nueva = r3(num(data) + rest);
+        if (p && num(p.cantidad) !== nueva) { p.cantidad = nueva; stockChanged = true; }
+      }
+    }
+    if (pendLog.length) {
+      const batch = pendLog.splice(0);
+      const { error } = await supa.from('historial').insert(batch);
+      if (error) { pendLog.unshift(...batch); throw error; }
+      if (ui.tab === 'historial') loadHistorial();
+    }
+    setStatus('ok');
+  } catch (e) {
+    console.warn('Error al sincronizar', e);
+    if (isAuthError(e)) { setStatus('error'); showLogin('Tu sesión venció. Vuelve a ingresar la clave.'); }
+    else { setStatus('offline'); retryTimer = setTimeout(sync, 5000); }
+  } finally {
+    syncing = false;
+    if (stockChanged) renderSoon();
+    if (syncAgain) { syncAgain = false; sync(); }
+  }
+}
+
+/** Llega un cambio hecho en otro equipo. */
+function onRemote(payload) {
+  const ev = payload.eventType;
+  const row = ev === 'DELETE' ? payload.old : payload.new;
+  if (!row || !row.coleccion || !row.id) return;
+  const col = row.coleccion, id = row.id, k = `${col}|${id}`;
+  if (col !== 'config' && !COLS.includes(col)) return;
+  const arr = col === 'config' ? null : S[col];
+  const local = col === 'config' ? { config: S.config, counters: S.counters } : arr.find(x => x.id === id);
+  const dirty = forceFull || (local ? stable(wire(col, local)) : undefined) !== snap.get(k);
+  if (ev === 'DELETE') {
+    snap.delete(k);
+    if (!dirty && arr) {
+      const i = arr.findIndex(x => x.id === id);
+      if (i >= 0) arr.splice(i, 1);
+      if (col === 'productos') pendDelta.delete(id);
+    }
+  } else {
+    const data = row.data || {};
+    snap.set(k, stable(data));
+    if (!dirty) {
+      if (col === 'config') {
+        const n = normalizeData({ config: data.config, counters: data.counters });
+        for (const key of Object.keys(S.counters)) n.counters[key] = Math.max(num(n.counters[key]), num(S.counters[key]));
+        S.config = n.config; S.counters = n.counters;
+      } else {
+        const fresh = JSON.parse(JSON.stringify(data));
+        if (col === 'productos') fresh.cantidad = r3(num(fresh.cantidad) + (pendDelta.get(id) || 0));
+        if (local) { Object.keys(local).forEach(key => delete local[key]); Object.assign(local, fresh); }
+        else arr.push(fresh);
+      }
+    } else scheduleSync();
+  }
+  renderSoon();
+}
+
+let renderTimer = null;
+function renderSoon() {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(() => renderAll({ remote: true }), 120);
+}
+
+async function loadAll() {
+  const rows = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supa.from('registros').select('coleccion,id,data').order('coleccion').order('id').range(from, from + 999);
+    if (error) throw error;
+    rows.push(...data);
+    if (data.length < 1000) break;
+  }
+  const d = defaultData();
+  let cfg = null;
+  snap.clear();
+  for (const r of rows) {
+    snap.set(`${r.coleccion}|${r.id}`, stable(r.data));
+    if (r.coleccion === 'config') cfg = r.data;
+    else if (COLS.includes(r.coleccion)) d[r.coleccion].push(r.data);
+  }
+  if (cfg) { d.config = cfg.config; d.counters = cfg.counters; }
+  S = normalizeData(d);
+  pendDelta.clear();
+  return rows.length;
+}
+
+/** Vuelve a leer todo (al volver a la página o al recuperar la conexión). */
+async function refresh() {
+  if (!ready) return;
+  if (syncing || hasPending()) { scheduleSync(50); setTimeout(refresh, 2500); return; }
+  if (document.querySelector('dialog[open]')) return;
+  try { await loadAll(); renderAll({ remote: true }); setStatus('ok'); }
+  catch (e) { if (isAuthError(e)) showLogin('Tu sesión venció. Vuelve a ingresar la clave.'); else setStatus('offline'); }
+}
+
+function subscribe() {
+  if (chan) supa.removeChannel(chan);
+  let first = true;
+  chan = supa.channel('bodega-registros')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'registros' }, onRemote)
+    .subscribe(st => {
+      if (st === 'SUBSCRIBED') { if (!first) refresh(); first = false; }
+      else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT') setStatus('offline');
+    });
+}
+
+function setStatus(st) {
+  const el = $('#sync');
+  if (!el) return;
+  if (st === 'saving' && !hasPending()) st = 'ok';
+  const txt = { ok: 'Sincronizado', saving: 'Guardando…', offline: 'Sin conexión · reintentando', error: 'Sin sesión' }[st] || '';
+  el.className = 'sync ' + st;
+  el.querySelector('span').textContent = txt;
+  el.title = st === 'ok' ? 'Todo está guardado en la nube' : txt;
+}
+
+/* ---------- Pantalla de ingreso ---------- */
+function showLogin(msg = '') {
+  ready = false;
+  $('#app-loading').hidden = true;
+  const box = $('#login');
+  box.hidden = false;
+  const f = $('#login-form');
+  f.elements.nombre.value = USUARIO || '';
+  f.elements.email.value = lsGet(EMAIL_KEY) || '';
+  $('#login-err').textContent = msg;
+  setTimeout(() => (f.elements.nombre.value ? (f.elements.email.value ? f.elements.clave : f.elements.email) : f.elements.nombre).focus(), 50);
+}
+async function doLogin(e) {
+  e.preventDefault();
+  const f = e.target, E = f.elements, btn = $('button', f);
+  const nombre = E.nombre.value.trim(), email = E.email.value.trim(), clave = E.clave.value;
+  if (!nombre) return;
+  btn.disabled = true; btn.textContent = 'Entrando…';
+  $('#login-err').textContent = '';
+  const { error } = await supa.auth.signInWithPassword({ email, password: clave });
+  btn.disabled = false; btn.textContent = 'Entrar';
+  if (error) {
+    $('#login-err').textContent = /invalid/i.test(error.message) ? 'Correo o clave incorrectos.' : 'No se pudo entrar: ' + error.message;
+    E.clave.select();
+    return;
+  }
+  E.clave.value = '';
+  USUARIO = nombre; lsSet(USER_KEY, nombre); lsSet(EMAIL_KEY, email);
+  $('#login').hidden = true;
+  enterApp();
+}
+async function logout() {
+  if (hasPending() && !(await confirmBox('Hay cambios que aún no se guardaron en la nube. Si sales ahora se pierden.', { ok: 'Salir igual', danger: true, title: 'Cerrar sesión' }))) return;
+  if (chan) { supa.removeChannel(chan); chan = null; }
+  await supa.auth.signOut();
+  S = defaultData(); snap.clear(); pendDelta.clear(); pendLog.length = 0;
+  renderAll();
+  showLogin();
+}
+function editUser() {
+  const d = modal({
+    title: 'Tu usuario', size: 'sm',
+    body: `<form id="f-user"><label class="field"><span>Tu nombre (aparece en el historial)</span><input name="n" required maxlength="40" value="${esc(USUARIO)}"></label></form>`,
+    foot: `<button class="btn danger-ghost" type="button" data-out>Cerrar sesión</button><span class="spacer"></span><button class="btn" data-close>Cancelar</button><button class="btn primary" type="submit" form="f-user">Guardar</button>`,
+  });
+  $('form', d).addEventListener('submit', e => {
+    e.preventDefault();
+    const v = $('[name=n]', d).value.trim();
+    if (v) { USUARIO = v; lsSet(USER_KEY, v); renderWho(); toast('Nombre actualizado'); }
+    d.close();
+  });
+  $('[data-out]', d).addEventListener('click', () => { d.close(); logout(); });
+}
+function renderWho() { const b = $('#who-name'); if (b) b.textContent = USUARIO || 'Sin nombre'; }
+
+async function enterApp() {
+  $('#app-loading').hidden = false;
+  try {
+    await loadAll();
+  } catch (e) {
+    console.warn(e);
+    if (isAuthError(e)) return showLogin('Tu sesión venció. Vuelve a ingresar la clave.');
+    $('#app-loading').innerHTML = `<div class="login-card"><h2>No se pudo conectar</h2><p class="muted">Revisa tu internet y vuelve a intentar.</p><button class="btn primary block" onclick="location.reload()">Reintentar</button></div>`;
+    return;
+  }
+  ready = true;
+  $('#app-loading').hidden = true;
+  renderWho();
+  renderAll();
+  setTab(location.hash.slice(1) || 'inventario');
+  subscribe();
+  setStatus('ok');
+  if (!snap.has('config|main')) scheduleSync(50);   // primera vez: guarda la configuración
+  migrarDatosLocales();
+}
+
+/** Si este navegador tiene datos de la versión anterior (sin nube), ofrece subirlos. */
+async function migrarDatosLocales() {
+  let legacy = null;
+  try { legacy = JSON.parse(lsGet(LEGACY_KEY) || 'null'); } catch { legacy = null; }
+  if (!legacy || !Array.isArray(legacy.productos) || !legacy.productos.length) return;
+  if (S.productos.length) {
+    toast('Este navegador tenía datos de la versión anterior. Si los necesitas, usa Configuración → Importar respaldo.');
+    return;
+  }
+  const ok = await confirmBox(`Este navegador tiene <b>${legacy.productos.length} productos</b> guardados de la versión anterior. ¿Subirlos a la nube para que todos los vean?`, { ok: 'Subir a la nube', title: 'Datos encontrados' });
+  if (!ok) return;
+  replaceAll(normalizeData(legacy));
+  logH('Datos migrados', `${S.productos.length} productos subidos desde un navegador`);
+  commit();
+  lsSet(LEGACY_KEY + '.migrado', lsGet(LEGACY_KEY) || '');
+  lsDel(LEGACY_KEY);
+  toast('Datos subidos a la nube');
+}
+
+/* =========================================================
+   Arranque
+   ========================================================= */
+function renderAll(opts = {}) {
   $('#brandName').textContent = S.config.nombre;
   document.title = `${S.config.nombre} · Inventario`;
   renderInventario();
   renderDevoluciones();
   renderProveedores();
   renderPOS();
-  renderConfig();
-  openDetails.forEach(d => d._paint && d._paint());
+  // si llega un cambio de otro equipo mientras escribes en Configuración, no borrar lo que escribes
+  if (!(opts.remote && $('#tab-config').contains(document.activeElement))) renderConfig();
+  openDetails.forEach(d => {
+    if (opts.remote && d.contains(document.activeElement) && document.activeElement.matches('input,select,textarea')) return;
+    d._paint && d._paint();
+  });
 }
 
-function init() {
+async function init() {
   buildInventario();
   buildDevoluciones();
   buildProveedores();
   buildVentas();
+  buildHistorial();
   buildConfig();
-  $$('.tab').forEach(b => b.addEventListener('click', () => { setTab(b.dataset.tab); window.scrollTo({ top: 0 }); }));
+  $$('.tab').forEach(b => b.addEventListener('click', () => {
+    setTab(b.dataset.tab); window.scrollTo({ top: 0 });
+    if (b.dataset.tab === 'historial') loadHistorial();
+  }));
   window.addEventListener('hashchange', () => setTab(location.hash.slice(1)));
-  // sincroniza si se abre la página en otra pestaña del mismo navegador
   window.addEventListener('storage', e => {
-    if (e.key === STORE_KEY) { S = loadData(); renderAll(); }
     if (e.key === CART_KEY) { try { CART = JSON.parse(e.newValue || '[]'); } catch { CART = []; } renderPOS(); }
   });
+  window.addEventListener('beforeunload', e => { if (ready && hasPending()) { e.preventDefault(); e.returnValue = ''; } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+  window.addEventListener('online', () => { scheduleSync(50); refresh(); });
+  $('#login-form').addEventListener('submit', doLogin);
+  $('#who').addEventListener('click', editUser);
   renderAll();
-  setTab(location.hash.slice(1) || 'inventario');
+  if (!supa) {
+    $('#app-loading').innerHTML = `<div class="login-card"><h2>No se pudo cargar</h2><p class="muted">Falta el archivo supabase.js. Revisa que esté subido junto a la página.</p></div>`;
+    return;
+  }
+  const { data } = await supa.auth.getSession();
+  if (data?.session) {
+    await enterApp();
+    if (!USUARIO) editUser();
+  } else showLogin();
+  if (location.hash.slice(1) === 'historial') loadHistorial();
 }
 init();

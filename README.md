@@ -19,26 +19,28 @@ Según las salidas y ventas de los últimos 30 días (configurable):
 ## Subirla a GitHub Pages
 
 1. En GitHub, crea un repositorio nuevo (por ejemplo `bodega-inventario`), público.
-2. Botón **Add file → Upload files** y arrastra los 4 archivos: `index.html`, `styles.css`, `app.js`, `README.md`. Luego **Commit changes**.
+2. Botón **Add file → Upload files** y arrastra los 5 archivos: `index.html`, `styles.css`, `app.js`, `supabase.js`, `README.md`. Luego **Commit changes**.
 3. Ve a **Settings → Pages**. En *Source* elige **Deploy from a branch**, rama `main`, carpeta `/ (root)` y **Save**.
 4. En 1–2 minutos la página estará en `https://TU-USUARIO.github.io/bodega-inventario/`.
 
 Para probarla en tu computadora sin subirla, abre `index.html` con doble clic.
 
-## Importante: dónde se guardan los datos
+## Dónde se guardan los datos
 
-Los datos se guardan en el **navegador** (localStorage) de cada equipo. Eso significa:
+Los datos se guardan en **Supabase** (base de datos en la nube) y se sincronizan **en vivo**: si alguien vende, recibe un pedido o cambia un precio, los demás lo ven en segundos sin recargar.
 
-- Cada computadora o celular tiene sus propios datos. Lo que registras en la PC no aparece solo en el celular del ayudante.
-- Si se borran los datos del navegador, se pierde la información. Usa **Configuración → Descargar respaldo** seguido.
-- Para pasar los datos a otro equipo: descarga el respaldo en uno e **Importar respaldo** en el otro.
-
-Si necesitas que varias personas vean y editen los mismos datos al mismo tiempo, el siguiente paso es conectar la página a una base de datos en línea (por ejemplo Supabase) con inicio de sesión.
+- **Ingreso:** al abrir la página se pide *tu nombre*, el *correo de la bodega* y la *clave*. Se pide una sola vez por equipo.
+- **Historial:** la pestaña *Historial* muestra cada cambio con la persona, la fecha y la hora.
+- **Stock seguro:** las entradas y salidas se guardan como sumas y restas, así dos personas registrando a la vez no se pisan.
+- **Sin internet:** los cambios quedan pendientes y se envían solos al volver la conexión (el punto de arriba a la derecha se pone rojo mientras tanto).
+- **Respaldo:** igual conviene descargar un respaldo de vez en cuando (*Configuración → Descargar respaldo*).
+- **Cambiar la clave:** en Supabase → *Authentication → Users* → el usuario de la bodega → *Reset password*. Luego cada equipo vuelve a ingresar.
 
 ## Archivos
 
 ```
-index.html   estructura de la página y pestañas
+index.html   estructura de la página, pestañas y pantalla de ingreso
 styles.css   diseño (modo claro y oscuro, adaptado a celular)
-app.js       toda la lógica y el guardado de datos
+app.js       toda la lógica, sincronización con Supabase e historial
+supabase.js  librería oficial de Supabase (v2.45.4)
 ```

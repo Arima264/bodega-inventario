@@ -327,6 +327,29 @@ dialog::backdrop{background:rgba(18,16,13,.5);backdrop-filter:blur(2px)}
 .rot-legend li{display:flex;gap:10px;align-items:center}
 .rot-legend .badge{min-width:118px}
 
+/* ---------- Conexión, usuario e ingreso ---------- */
+.top-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.sync{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--ink-3);white-space:nowrap}
+.sync i{width:9px;height:9px;border-radius:50%;background:var(--ink-3);flex-shrink:0}
+.sync.ok i{background:var(--green)}
+.sync.saving i{background:var(--amber);animation:pulse 1s infinite}
+.sync.offline i,.sync.error i{background:var(--danger)}
+.sync.offline,.sync.error{color:var(--danger)}
+@keyframes pulse{50%{opacity:.35}}
+.who{display:flex;align-items:center;gap:6px;border:1px solid var(--line-2);background:var(--surface);border-radius:999px;padding:6px 12px;font-weight:700;font-size:13px;cursor:pointer;max-width:170px}
+.who span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.who:hover{border-color:var(--ink-3)}
+.overlay{position:fixed;inset:0;z-index:50;background:var(--bg);display:grid;place-items:center;padding:16px;overflow:auto}
+.loader{width:38px;height:38px;border-radius:50%;border:4px solid var(--line-2);border-top-color:var(--accent);animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.login-card{width:min(400px,100%);background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow);padding:26px 24px;display:grid;gap:14px}
+.login-card .logo{color:var(--accent);display:block}
+.login-card h1,.login-card h2{margin:0;font-size:22px;font-weight:800;letter-spacing:-.02em}
+.login-card p{margin:0}
+.login-err{color:var(--danger);font-weight:700;font-size:14px;min-height:1px}
+.login-err:empty{display:none}
+.m-foot .spacer{flex:1}
+
 /* ---------- Avisos ---------- */
 #toasts{inset:auto;left:50%;bottom:22px;transform:translateX(-50%);margin:0;padding:0;border:0;background:transparent;overflow:visible;display:grid;gap:8px;justify-items:center;width:max-content;max-width:calc(100vw - 24px)}
 #toasts:not(:popover-open){display:none}
@@ -343,7 +366,9 @@ dialog::backdrop{background:rgba(18,16,13,.5);backdrop-filter:blur(2px)}
   #toasts{bottom:92px}
 }
 @media (max-width:760px){
-  .topbar-in{flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px 8px}
+  .topbar-in{flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px 8px;position:relative}
+  .top-right{position:absolute;top:12px;right:12px}
+  .sync span{display:none}
   main{padding:0 12px 90px}
   .ph h2{font-size:22px}
   .grid2,.grid3{grid-template-columns:1fr}

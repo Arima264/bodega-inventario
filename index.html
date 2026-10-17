@@ -28,8 +28,16 @@
         <button class="tab" data-tab="devoluciones">Devoluciones</button>
         <button class="tab" data-tab="proveedores">Proveedores y pedidos</button>
         <button class="tab" data-tab="ventas">Precios y carrito</button>
+        <button class="tab" data-tab="historial">Historial</button>
         <button class="tab" data-tab="config">Configuración</button>
       </nav>
+      <div class="top-right">
+        <div class="sync saving" id="sync" title="Estado de la conexión"><i></i><span>Conectando…</span></div>
+        <button class="who" id="who" type="button" title="Tu nombre y cerrar sesión">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          <span id="who-name">—</span>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -38,6 +46,7 @@
     <section class="panel" id="tab-devoluciones"></section>
     <section class="panel" id="tab-proveedores"></section>
     <section class="panel" id="tab-ventas"></section>
+    <section class="panel" id="tab-historial"></section>
     <section class="panel" id="tab-config"></section>
   </main>
 
@@ -49,6 +58,27 @@
     <option value="caja"><option value="paquete"><option value="docena"><option value="saco"><option value="bolsa">
   </datalist>
 
+  <!-- Pantalla de carga -->
+  <div class="overlay" id="app-loading"><div class="loader" aria-label="Cargando"></div></div>
+
+  <!-- Pantalla de ingreso (clave única de la bodega) -->
+  <div class="overlay" id="login" hidden>
+    <form class="login-card" id="login-form" autocomplete="on">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="46" height="46"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M8 13l8-5 8 5v11H8z" fill="none" stroke="#fff" stroke-width="2.4" stroke-linejoin="round"/><path d="M13 24v-6h6v6" fill="none" stroke="#fff" stroke-width="2.4"/></svg>
+      </span>
+      <h1>Inventario de la bodega</h1>
+      <p class="muted">Ingresa para ver y registrar el inventario. Todos ven los mismos datos al instante.</p>
+      <label class="field"><span>Tu nombre</span><input name="nombre" required maxlength="40" placeholder="Ej. Sandro" autocomplete="nickname"><small>Aparece en el historial de cambios.</small></label>
+      <label class="field"><span>Correo de la bodega</span><input name="email" type="email" required autocomplete="username"></label>
+      <label class="field"><span>Clave</span><input name="clave" type="password" required autocomplete="current-password"></label>
+      <button class="btn primary block lg" type="submit">Entrar</button>
+      <p class="login-err" id="login-err" role="alert"></p>
+      <small class="muted">El correo y la clave se piden una sola vez en cada equipo.</small>
+    </form>
+  </div>
+
+  <script src="supabase.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
